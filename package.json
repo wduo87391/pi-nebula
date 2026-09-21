@@ -1,0 +1,22 @@
+{
+	"name": "pi-nebula",
+	"version": "0.1.0",
+	"description": "One chrome extension + one theme for pi: welcome overlay, status bar, metrics bar, editor shell, tool rows — base16 nebula配色.",
+	"keywords": [
+		"pi-package"
+	],
+	"license": "MIT",
+	"type": "module",
+	"pi": {
+		"extensions": [
+			"./extensions"
+		],
+		"themes": [
+			"./themes"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	}
+}
