@@ -1,2 +1,7 @@
 node_modules/
 *.log
+
+# Internal dev artifacts — kept on disk, never published.
+HANDOFF.md
+prototype/
+ChatGPT Image *.png
