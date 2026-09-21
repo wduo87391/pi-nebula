@@ -32,9 +32,13 @@ _Avoid_: 复刻、还原、1:1
 pi 原生的顶部区域，逐条列出已加载的 context files / skills / extensions / themes——信息密、无视觉层级。当前界面里最丑的部分。
 _Avoid_: welcome、header（不要与 welcome overlay 混用）
 
+**常驻面板 (persistent panel)**:
+pi-nebula 用来取代启动面板的常驻区域：钉在屏幕顶部，位于对话与状态条之上，含键位 Tips、Loaded 计数、Recent sessions。默认形态。
+_Avoid_: 启动页、welcome、header
+
 **welcome overlay**:
-pi-nebula 用来取代启动面板的启动浮层：居中、一次性、含键位 Tips、Loaded 计数、Recent sessions，启动后或按键即消失。
-_Avoid_: welcome screen、启动头、启动页
+常驻面板的可选替代形态：居中浮窗、一次性、按键即消失（`nebula.welcome = "overlay"`）。关闭后只剩一条空的编辑器，因此不是默认。
+_Avoid_: 启动页、启动浮层
 
 **pi-nebula**:
 本项目的交付物，一个同时提供 extension 与 theme 的包。
