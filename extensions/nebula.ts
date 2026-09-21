@@ -66,7 +66,7 @@ const lr = (l: string, r: string, n: number) => pad(l, Math.max(0, n - visibleWi
 const PI_BANNER = ["█████████", "███   ███", "██████   ███", "███      ███"];
 const BANNER_W = Math.max(...PI_BANNER.map((b) => visibleWidth(b)));
 
-const G = { dot: "●", ok: "✓", bad: "✗", tree: "└", bar: "▎", bullet: "•", branch: "\ue0a0", bulb: "\uf0eb", cube: "\uf1b2", clock: "\uf017", heavyH: "━", heavyV: "┃" };
+const G = { dot: "●", ok: "✓", bad: "✗", tree: "└", bullet: "•", branch: "\ue0a0", bulb: "\uf0eb", cube: "\uf1b2", clock: "\uf017", heavyH: "━", heavyV: "┃" };
 
 // --------------------------------------------------------------- settings --
 type WelcomeMode = "overlay" | "header" | "off";
@@ -357,12 +357,12 @@ function fmtArgs(name: string, args: any): string {
 	}
 }
 
-// Tool call row — ▎ ● name  args  <right>ms (variant C 块面: accent rail + dot).
+// Tool call row — ● name  args  <right>ms. No rail.
 function toolCallRow(width: number, name: string, args: any, ms: number | null, isError: boolean): string {
 	const w = Math.max(40, width);
 	const color = isError ? C.accent : C.ok;
 	const argStr = fmtArgs(name, args);
-	const left = fg(C.accent, G.bar + " ") + fg(color, G.dot + " ") + fg(color, bold(name)) + (argStr ? "  " + fg(C.muted, argStr) : "");
+	const left = fg(color, G.dot + " ") + fg(color, bold(name)) + (argStr ? "  " + fg(C.muted, argStr) : "");
 	const right = isError ? fg(C.accent, G.bad) : (ms != null ? fg(C.dim, `${ms}ms`) : "");
 	return fit(lr(left, right, w), w);
 }
@@ -380,15 +380,15 @@ function resultText(result: any): string {
 
 const OUTPUT_PREVIEW = 8;
 
-// Tool result — ▎-railed dim sublines (variant C: result summary under the call line).
+// Tool result — indented dim output sublines (no rail).
 function toolResultRow(width: number, name: string, result: any, ms: number | null, expanded: boolean, isPartial: boolean, isError: boolean): string[] {
 	const w = Math.max(40, width);
-	const rail = fg(C.accent, G.bar) + "   ";
+	const ind = "  ";
 	const lines: string[] = [];
 
 	if (isError) {
 		const err = String(result?.details?.error ?? resultText(result)).trim();
-		if (err) for (const l of err.split("\n").slice(0, 3)) lines.push(truncateToWidth(rail + fg(C.accent, l), w, ""));
+		if (err) for (const l of err.split("\n").slice(0, 3)) lines.push(truncateToWidth(ind + fg(C.accent, l), w, ""));
 		return lines;
 	}
 
@@ -397,8 +397,8 @@ function toolResultRow(width: number, name: string, result: any, ms: number | nu
 	const outLines = out.split("\n");
 	const shown = expanded ? outLines : outLines.slice(0, OUTPUT_PREVIEW);
 	const rest = outLines.length - shown.length;
-	for (const l of shown) lines.push(truncateToWidth(rail + fg(C.muted, l), w, ""));
-	if (rest > 0) lines.push(fit(rail + fg(C.dim, `… ${rest} more lines — click to expand`), w));
+	for (const l of shown) lines.push(truncateToWidth(ind + fg(C.muted, l), w, ""));
+	if (rest > 0) lines.push(fit(ind + fg(C.dim, `… ${rest} more lines — click to expand`), w));
 	return lines;
 }
 
