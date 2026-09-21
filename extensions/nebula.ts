@@ -66,7 +66,7 @@ const lr = (l: string, r: string, n: number) => pad(l, Math.max(0, n - visibleWi
 const PI_BANNER = ["█████████", "███   ███", "██████   ███", "███      ███"];
 const BANNER_W = Math.max(...PI_BANNER.map((b) => visibleWidth(b)));
 
-const G = { dot: "●", ok: "✓", bullet: "•", branch: "\ue0a0", bulb: "\uf0eb", cube: "\uf1b2", clock: "\uf017", heavyH: "━", heavyV: "┃" };
+const G = { dot: "●", ok: "✓", bad: "✗", tree: "└", bullet: "•", branch: "\ue0a0", bulb: "\uf0eb", cube: "\uf1b2", clock: "\uf017", heavyH: "━", heavyV: "┃" };
 
 // --------------------------------------------------------------- settings --
 type WelcomeMode = "overlay" | "header" | "off";
@@ -329,16 +329,80 @@ const NebulaEditor: any = typeof CustomEditor === "function"
 
 // --------------------------------------------------------------- tool rows --
 // A Component is just { render(width), invalidate() } — so the row can lay
-// itself out against the real width pi hands us.
-const rowComponent = (make: (w: number) => string) => ({ render: (w: number) => [make(w)], invalidate() {} });
+// itself out against the real width pi hands us. renderCall/renderResult
+// REPLACE pi's built-in tool-box content entirely (tool-execution.ts), so the
+// result renderer must draw the tool's actual output itself — the old
+// single-line version silently hid read/bash/edit output.
+const rowComponent = (make: (w: number) => string[]) => ({ render: (w: number) => make(w), invalidate() {} });
 
-function toolRow(width: number, name: string, args: any, ms: number | null): string {
-	const ind = " ".repeat(INDENT);
-	const w = Math.max(40, width - INDENT);
-	const argStr = args && Object.keys(args).length ? JSON.stringify(args).slice(0, 70) : "";
-	const left = fg(C.ok, G.dot + " ") + fg(C.ok, bold(name)) + (argStr ? "  " + fg(C.muted, argStr) : "");
-	const right = ms != null ? fg(C.dim, `${ms}ms`) : "";
-	return ind + fit(lr(left, right, w), w);
+// Compact, human-readable args per tool (design: "● 名字 args"). Raw
+// JSON.stringify is unreadable for multi-field tools like edit.
+function fmtArgs(name: string, args: any): string {
+	if (!args) return "";
+	const s = (v: any) => (v == null ? "" : String(v));
+	switch (name) {
+		case "bash": return s(args.command).split("\n")[0].trim();
+		case "read": case "write": case "ls": return s(args.path);
+		case "edit": {
+			const p = s(args.path);
+			const first = s(args.oldText).split("\n")[0].trim();
+			return first ? `${p} · "${first.slice(0, 40)}"` : p;
+		}
+		case "grep": {
+			const path = s(args.path);
+			return path ? `${s(args.pattern)} in ${path}` : s(args.pattern);
+		}
+		case "find": return s(args.pattern) + (args.path ? ` in ${s(args.path)}` : "");
+		default: return JSON.stringify(args).slice(0, 70);
+	}
+}
+
+// Tool call row — ● name  args (green dot, design 图2).
+function toolCallRow(width: number, name: string, args: any, isError: boolean): string {
+	const w = Math.max(40, width);
+	const color = isError ? C.accent : C.ok;
+	const argStr = fmtArgs(name, args);
+	const left = fg(color, G.dot + " ") + fg(color, bold(name)) + (argStr ? "  " + fg(C.text, argStr) : "");
+	return fit(left, w);
+}
+
+// Text content of a tool result (text blocks only; pi renders images itself).
+function resultText(result: any): string {
+	if (!Array.isArray(result?.content)) return "";
+	return result.content
+		.filter((c: any) => c?.type === "text" && typeof c.text === "string")
+		.map((c: any) => c.text)
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+const OUTPUT_PREVIEW = 8;
+
+// Tool result — └ ✓ 42ms + output preview (design: 结果子行 + 耗时 + 状态色).
+function toolResultRow(width: number, name: string, result: any, ms: number | null, expanded: boolean, isPartial: boolean, isError: boolean): string[] {
+	const w = Math.max(40, width);
+	const lines: string[] = [];
+	const color = isError ? C.accent : C.ok;
+	const icon = isError ? G.bad : G.ok;
+	const left = fg(color, G.tree + " ") + fg(color, icon);
+	const right = [isPartial ? fg(C.warn, "…") : "", ms != null ? fg(C.dim, `${ms}ms`) : ""].filter(Boolean).join("  ");
+	lines.push(fit(lr(left, right, w), w));
+
+	if (isError) {
+		const err = String(result?.details?.error ?? resultText(result)).trim();
+		if (err) for (const l of err.split("\n").slice(0, 3)) lines.push(truncateToWidth(fg(C.accent, l), w, ""));
+		return lines;
+	}
+
+	const out = resultText(result);
+	if (!out) return lines;
+	const outLines = out.split("\n");
+	const shown = expanded ? outLines : outLines.slice(0, OUTPUT_PREVIEW);
+	const rest = outLines.length - shown.length;
+	for (const l of shown) lines.push(truncateToWidth(fg(C.muted, l), w, ""));
+	if (rest > 0) lines.push(fg(C.dim, `… ${rest} more lines — click to expand`));
+	return lines;
 }
 
 function registerToolRows(pi: ExtensionAPI, cwd: string) {
@@ -367,11 +431,13 @@ function registerToolRows(pi: ExtensionAPI, cwd: string) {
 				async execute(...a: any[]) { return (def as any).execute(...a); },
 				renderCall(args: any, _theme: any, context: any) {
 					if (context.executionStarted && context.state.t0 === undefined) context.state.t0 = Date.now();
-					return rowComponent((w) => toolRow(w, name, args, null));
+					return rowComponent((w) => [toolCallRow(w, name, args, !!context.isError)]);
 				},
-				renderResult(_result: any, _opts: any, _theme: any, context: any) {
+				renderResult(result: any, opts: any, _theme: any, context: any) {
 					const ms = context.state.t0 ? Date.now() - context.state.t0 : null;
-					return rowComponent((w) => toolRow(w, name, context.args, ms));
+					return rowComponent((w) =>
+						toolResultRow(w, name, result, ms, !!opts?.expanded, !!opts?.isPartial, !!context.isError),
+					);
 				},
 			} as any);
 		} catch (e) {
