@@ -11,7 +11,13 @@
  *   metrics bar        → ctx.ui.setWidget("nebula-metrics", …, belowEditor)
  *   editor shell       → class NebulaEditor extends CustomEditor (shared INDENT)
  *   tool rows          → pi.registerTool() over the 7 built-ins, execute()
- *                        delegated back to the original definitions
+ *                        delegated back to the original definitions. Drawn with
+ *                        renderShell: "self" (no box/background): a call line
+ *                        "● Name  [arg • arg]  42ms" plus a "└ summary" result
+ *                        line; raw output only when the row is expanded.
+ *   user messages      → pi.registerMarkdownTransformer() prepends the design's
+ *                        "❯ " marker. Built-in message renderers are not
+ *                        replaceable, so this is the only hook that reaches them.
  *
  * Colors are the base16 "nebula" scheme (same values as themes/nebula.json),
  * emitted as raw truecolor ANSI. The chrome and the theme ship together as one
@@ -328,42 +334,83 @@ const NebulaEditor: any = typeof CustomEditor === "function"
 	: null;
 
 // --------------------------------------------------------------- tool rows --
-// A Component is just { render(width), invalidate() } — so the row can lay
-// itself out against the real width pi hands us. renderCall/renderResult
-// REPLACE pi's built-in tool-box content entirely (tool-execution.ts), so the
-// result renderer must draw the tool's actual output itself — the old
-// single-line version silently hid read/bash/edit output.
+// A Component is just { render(width), invalidate() } — so the row lays itself
+// out against the real width pi hands us. renderCall/renderResult REPLACE pi's
+// built-in tool-box content entirely (tool-execution.ts).
+//
+// renderShell: "self" — we draw our own framing because the design has no box
+// or background. In self-shell mode ToolExecutionComponent stacks our call
+// component then our result component into a bare Container and emits one blank
+// line above the row. It also re-runs renderCall whenever the row updates, so
+// the call line picks up the final duration once the result lands.
+//
+// Layout (per design稿):
+//   ● Read  [./README.md • lines 1–120]           42ms
+//     └ Read 120 lines
+//         <raw output, only when the row is expanded>
 const rowComponent = (make: (w: number) => string[]) => ({ render: (w: number) => make(w), invalidate() {} });
 
-// Compact, human-readable args per tool (design: "● 名字 args"). Raw
-// JSON.stringify is unreadable for multi-field tools like edit.
-function fmtArgs(name: string, args: any): string {
-	if (!args) return "";
+const toolDisplayName = (name: string) => name.charAt(0).toUpperCase() + name.slice(1);
+
+// Compact, human-readable args per tool (design: "● 名字 [a • b]"). Returned as
+// plain-text parts; the row joins them with a dim " • " and wraps in brackets.
+// Raw JSON.stringify is unreadable for multi-field tools like edit.
+function argParts(name: string, args: any): string[] {
+	if (!args) return [];
 	const s = (v: any) => (v == null ? "" : String(v));
 	switch (name) {
-		case "bash": return s(args.command).split("\n")[0].trim();
-		case "read": case "write": case "ls": return s(args.path);
+		case "bash": return [s(args.command).split("\n")[0].trim()];
+		case "write": return [s(args.path)];
+		case "ls": return [s(args.path) || "."];
+		case "read": {
+			const parts = args.path ? [s(args.path)] : [];
+			if (args.offset !== undefined || args.limit !== undefined) {
+				const start = args.offset ?? 1;
+				const end = args.limit !== undefined ? start + args.limit - 1 : undefined;
+				parts.push(`lines ${start}${end !== undefined ? `–${end}` : "+"}`);
+			}
+			return parts;
+		}
 		case "edit": {
-			const p = s(args.path);
-			const first = s(args.oldText).split("\n")[0].trim();
-			return first ? `${p} · "${first.slice(0, 40)}"` : p;
+			const n = Array.isArray(args.edits) ? args.edits.length : args.oldText ? 1 : 0;
+			return [s(args.path), `${n} change${n === 1 ? "" : "s"}`];
 		}
 		case "grep": {
-			const path = s(args.path);
-			return path ? `${s(args.pattern)} in ${path}` : s(args.pattern);
+			const parts = [`"${s(args.pattern)}"`];
+			if (args.path) parts.push(s(args.path));
+			if (args.glob) parts.push(s(args.glob));
+			return parts;
 		}
-		case "find": return s(args.pattern) + (args.path ? ` in ${s(args.path)}` : "");
-		default: return JSON.stringify(args).slice(0, 70);
+		case "find": {
+			const parts = [s(args.pattern)];
+			if (args.path) parts.push(s(args.path));
+			return parts;
+		}
+		default: return [JSON.stringify(args).slice(0, 70)];
 	}
 }
 
-// Tool call row — ● name  args  <right>ms. No rail.
+function bracketize(parts: string[]): string {
+	if (parts.length === 0) return "";
+	const body = parts.map((p) => fg(C.text, p)).join(fg(C.dim, " • "));
+	return "  " + fg(C.dim, "[") + body + fg(C.dim, "]");
+}
+
+// 42ms / 2.3s / 1m 5s — matches the design's right-aligned duration.
+function fmtDuration(ms: number): string {
+	if (ms < 1000) return `${Math.round(ms)}ms`;
+	const sec = ms / 1000;
+	if (sec < 60) return `${sec.toFixed(1)}s`;
+	return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`;
+}
+
+// Tool call row — ● Name  [arg • arg]  <right>ms (✗ + accent on error). No rail.
 function toolCallRow(width: number, name: string, args: any, ms: number | null, isError: boolean): string {
 	const w = Math.max(40, width);
 	const color = isError ? C.accent : C.ok;
-	const argStr = fmtArgs(name, args);
-	const left = fg(color, G.dot + " ") + fg(color, bold(name)) + (argStr ? "  " + fg(C.muted, argStr) : "");
-	const right = isError ? fg(C.accent, G.bad) : (ms != null ? fg(C.dim, `${ms}ms`) : "");
+	const mark = isError ? G.bad : G.dot;
+	const left = fg(color, mark + " ") + fg(color, bold(toolDisplayName(name))) + bracketize(argParts(name, args));
+	const right = ms != null ? fg(C.dim, fmtDuration(ms)) : "";
 	return fit(lr(left, right, w), w);
 }
 
@@ -373,32 +420,93 @@ function resultText(result: any): string {
 	return result.content
 		.filter((c: any) => c?.type === "text" && typeof c.text === "string")
 		.map((c: any) => c.text)
-		.join("\n")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
+		.join("\n");
 }
 
-const OUTPUT_PREVIEW = 8;
+const hasImage = (result: any) => Array.isArray(result?.content) && result.content.some((c: any) => c?.type === "image");
+// Drop the trailing "[...]" continuation notice pi appends, so counts are clean.
+const stripNotices = (s: string) => s.replace(/\n\n\[[\s\S]*\]\s*$/, "").trim();
+const countLines = (s: string) => { const t = s.replace(/\n+$/, ""); return t.trim() === "" ? 0 : t.split("\n").length; };
 
-// Tool result — indented dim output sublines (no rail).
-function toolResultRow(width: number, name: string, result: any, ms: number | null, expanded: boolean, isPartial: boolean, isError: boolean): string[] {
-	const w = Math.max(40, width);
-	const ind = "  ";
-	const lines: string[] = [];
-
-	if (isError) {
-		const err = String(result?.details?.error ?? resultText(result)).trim();
-		if (err) for (const l of err.split("\n").slice(0, 3)) lines.push(truncateToWidth(ind + fg(C.accent, l), w, ""));
-		return lines;
+function diffStats(diff: string): { add: number; del: number } {
+	let add = 0, del = 0;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("+") && !line.startsWith("+++")) add++;
+		else if (line.startsWith("-") && !line.startsWith("---")) del++;
 	}
+	return { add, del };
+}
 
-	const out = resultText(result);
-	if (!out) return lines;
-	const outLines = out.split("\n");
-	const shown = expanded ? outLines : outLines.slice(0, OUTPUT_PREVIEW);
-	const rest = outLines.length - shown.length;
-	for (const l of shown) lines.push(truncateToWidth(ind + fg(C.muted, l), w, ""));
-	if (rest > 0) lines.push(fit(ind + fg(C.dim, `… ${rest} more lines — click to expand`), w));
+function errorLine(result: any): string {
+	const raw = String(result?.details?.error ?? resultText(result)).trim();
+	return raw.split("\n")[0] ?? "";
+}
+
+// One-line human summary for the "└" subline — the design's hand-picked
+// summaries, reconstructed from each tool's real result/details.
+function resultSummary(name: string, args: any, result: any, isError: boolean): string {
+	if (isError) return fg(C.accent, errorLine(result) || "error");
+	const text = resultText(result);
+	switch (name) {
+		case "read": {
+			if (hasImage(result)) return fg(C.ok, "Image loaded");
+			const n = countLines(stripNotices(text));
+			return fg(C.muted, `Read ${n} line${n === 1 ? "" : "s"}`);
+		}
+		case "write": {
+			const n = args?.content ? String(args.content).replace(/\n+$/, "").split("\n").length : 0;
+			return fg(C.muted, `Wrote ${n} line${n === 1 ? "" : "s"}`);
+		}
+		case "edit": {
+			const d = result?.details?.diff;
+			if (typeof d !== "string" || !d) return fg(C.muted, "Updated");
+			const { add, del } = diffStats(d);
+			return fg(C.muted, "Updated • ") + fg(C.ok, `+${add}`) + " " + fg(C.accent, `−${del}`);
+		}
+		case "grep": {
+			if (/no matches/i.test(text)) return fg(C.muted, "No matches");
+			const n = countLines(text);
+			return fg(C.muted, `Found ${n} match${n === 1 ? "" : "es"}`);
+		}
+		case "find": {
+			if (/no files found/i.test(text)) return fg(C.muted, "No files");
+			const n = countLines(text);
+			return fg(C.muted, `Found ${n} file${n === 1 ? "" : "s"}`);
+		}
+		case "ls": {
+			if (/empty directory/i.test(text)) return fg(C.muted, "Empty");
+			const n = countLines(text);
+			return fg(C.muted, `Listed ${n} entr${n === 1 ? "y" : "ies"}`);
+		}
+		case "bash": {
+			const n = text ? countLines(stripNotices(text)) : 0;
+			return fg(C.muted, "Done") + (n ? fg(C.dim, ` • ${n} line${n === 1 ? "" : "s"}`) : "");
+		}
+		default: return fg(C.muted, (text.split("\n")[0] ?? "").slice(0, 80));
+	}
+}
+
+const RESULT_INDENT = "  ";    // puts └ under the ●
+const OUTPUT_INDENT = "    ";
+
+// Tool result — "└ summary" plus, when expanded, the raw output lines indented
+// below (read/write get line numbers; other tools stay plain).
+function toolResultRow(width: number, name: string, args: any, result: any, isPartial: boolean, expanded: boolean, isError: boolean): string[] {
+	const w = Math.max(40, width);
+	const head = RESULT_INDENT + fg(C.dim, G.tree + " ");
+	if (isPartial) return [truncateToWidth(head + fg(C.dim, "…"), w, "")];
+
+	const lines: string[] = [truncateToWidth(head + resultSummary(name, args, result, isError), w, "")];
+	if (!expanded || isError) return lines;
+
+	const raw = resultText(result).replace(/\n+$/, "").split("\n");
+	if (raw.length === 0 || (raw.length === 1 && raw[0] === "")) return lines;
+	const numbered = name === "read" || name === "write";
+	const numW = String(raw.length).length;
+	raw.forEach((l, i) => {
+		const num = numbered ? fg(C.dim, String(i + 1).padStart(numW) + "  ") : "";
+		lines.push(truncateToWidth(OUTPUT_INDENT + num + fg(C.muted, l), w, ""));
+	});
 	return lines;
 }
 
@@ -425,16 +533,25 @@ function registerToolRows(pi: ExtensionAPI, cwd: string) {
 				...(def as any).promptGuidelines ? { promptGuidelines: (def as any).promptGuidelines } : {},
 				...(def as any).prepareArguments ? { prepareArguments: (def as any).prepareArguments } : {},
 				...(def as any).executionMode ? { executionMode: (def as any).executionMode } : {},
+				// Preserve the built-in's structured-output preference — registerTool
+				// replaces the definition entirely, so an omitted field is dropped.
+				...(def as any).constrainedSampling ? { constrainedSampling: (def as any).constrainedSampling } : {},
+				// Draw our own framing (no Box/background). Self-shell rows get one blank
+				// line above them from ToolExecutionComponent, which matches the design gap.
+				renderShell: "self",
 				async execute(...a: any[]) { return (def as any).execute(...a); },
 				renderCall(args: any, _theme: any, context: any) {
-					if (context.executionStarted && context.state.t0 === undefined) context.state.t0 = Date.now();
-					const ms = context.state.t0 ? Date.now() - context.state.t0 : null;
+					// t0 is captured once; endedAt freezes the duration on the first
+					// non-partial render so the row does not keep counting after it settles.
+					const state = context.state;
+					if (context.executionStarted && state.t0 === undefined) state.t0 = Date.now();
+					if (!context.isPartial && state.t0 !== undefined && state.endedAt === undefined) state.endedAt = Date.now();
+					const ms = state.t0 !== undefined ? (state.endedAt ?? Date.now()) - state.t0 : null;
 					return rowComponent((w) => [toolCallRow(w, name, args, ms, !!context.isError)]);
 				},
 				renderResult(result: any, opts: any, _theme: any, context: any) {
-					const ms = context.state.t0 ? Date.now() - context.state.t0 : null;
 					return rowComponent((w) =>
-						toolResultRow(w, name, result, ms, !!opts?.expanded, !!opts?.isPartial, !!context.isError),
+						toolResultRow(w, name, context.args, result, !!opts?.isPartial, !!opts?.expanded, !!context.isError),
 					);
 				},
 			} as any);
@@ -442,6 +559,24 @@ function registerToolRows(pi: ExtensionAPI, cwd: string) {
 			console.debug(`[pi-nebula] tool override failed for ${name}:`, e);
 		}
 	}
+}
+
+// ---------------------------------------------------------- user messages --
+// pi renders built-in messages itself — UserMessageComponent is a Box filled
+// with userMessageBg wrapping Markdown colored by userMessageText, and there is
+// no render hook for it. The one lever is registerMarkdownTransformer, which
+// runs on messageType "user" too (UserMessageComponent feeds registered
+// transformers into its Markdown). We use it to prepend the design's "❯ " mark.
+// Guard: skip when the first line is block-level markdown (fence / heading /
+// quote / list / table / HTML), so the prefix can never demote it to a paragraph.
+function markUserMessage(markdown: string): string {
+	const lines = markdown.split("\n");
+	const i = lines.findIndex((l) => l.trim() !== "");
+	if (i === -1) return markdown;
+	if (/^\s*(```|~~~|#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\||<)/.test(lines[i])) return markdown;
+	if (lines[i].startsWith("❯ ")) return markdown;
+	lines[i] = "❯ " + lines[i];
+	return lines.join("\n");
 }
 
 // ================================================================= entry ===
@@ -455,6 +590,13 @@ export default function (pi: ExtensionAPI) {
 	// replacement cannot stack duplicate handlers.
 	pi.on("thinking_level_select", () => { statusTui?.requestRender(); });
 	pi.on("session_shutdown", () => { stopWatching?.(); stopWatching = undefined; });
+
+	// "❯ " marker on user messages (see markUserMessage). Display-only.
+	try {
+		(pi as any).registerMarkdownTransformer?.((markdown: string, tctx: any) =>
+			tctx?.messageType === "user" && !tctx?.isStreaming ? markUserMessage(markdown) : markdown,
+		);
+	} catch (e) { console.debug("[pi-nebula] registerMarkdownTransformer failed:", e); }
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
