@@ -437,6 +437,8 @@ export default function (pi: ExtensionAPI) {
 			try { registerToolRows(pi, ctx.cwd); } catch (e) { console.debug("[pi-nebula] tool rows failed:", e); }
 		};
 
+		await install();
+
 		// Re-read settings / refresh data when settings.json changes on disk
 		// (e.g. after a home-manager switch mid-session). Re-installing chrome is
 		// cheap (all setters are idempotent) and picks up nebula.welcome changes.
