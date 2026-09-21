@@ -2,8 +2,9 @@
  * pi-nebula — the chrome extension.
  *
  * Owns every visual slot pi exposes to extensions:
- *   welcome overlay    → ctx.ui.custom({ overlay: true }) at session start,
- *                        centered, dismissed by any key
+ *   welcome panel      → ctx.ui.setHeader() — persistent, pinned at the top of
+ *                        the screen, above the conversation and the status bar
+ *                        (design order: panel · status bar · editor · metrics)
  *   status bar         → ctx.ui.setWidget("nebula-status")  (above editor)
  *   bottom footer      → ctx.ui.setFooter() — rendered blank; only used to
  *                        capture footerData (git branch) for the status bar
@@ -17,7 +18,7 @@
  * package, so the two can never drift.
  *
  * Configuration (settings.json → "nebula" key, per ADR-0002):
- *   { "welcome": "overlay" | "header" | "off" }   default "overlay"
+ *   { "welcome": "header" | "overlay" | "off" }   default "header"
  *
  * /nebula-off restores pi's built-in header/footer/widgets/editor for the
  * current session. Width is never hardcoded: pi re-calls render(width) on
@@ -80,7 +81,7 @@ function nebulaSettings(cwd: string): { welcome: WelcomeMode } {
 	const user = readJson(join(homedir(), ".pi/agent/settings.json"));
 	const project = readJson(join(cwd, ".pi/settings.json"));
 	const raw = { ...user?.nebula, ...project?.nebula };
-	const welcome: WelcomeMode = raw.welcome === "header" || raw.welcome === "off" ? raw.welcome : "overlay";
+	const welcome: WelcomeMode = raw.welcome === "overlay" || raw.welcome === "off" ? raw.welcome : "header";
 	return { welcome };
 }
 
@@ -248,6 +249,11 @@ function showWelcomeOverlay(ctx: any, counts: ReturnType<typeof loadedCounts>, s
 // above-editor status widget can read the git branch too.
 let cachedFooterData: any = null;
 
+// The design reads "think:med"; pi's level names are longer, so abbreviate the
+// two that overflow. ctx.thinkingLevel is the live value (docs/extensions.md:1015).
+const THINK_ABBR: Record<string, string> = { minimal: "min", medium: "med", xhigh: "xhi" };
+const thinkLabel = (level: string) => `think:${THINK_ABBR[level] ?? level}`;
+
 function statusBar(width: number, ctx: any, footerData: any): string {
 	const w = Math.max(40, width - INDENT - 2);
 	const ind = " ".repeat(INDENT);
@@ -258,7 +264,7 @@ function statusBar(width: number, ctx: any, footerData: any): string {
 	const modelName = ctx.model?.name ?? ctx.model?.id ?? "no-model";
 	const left = [
 		(provider ? fg(C.muted, provider) + " " : "") + fg(C.accent, bold(modelName)),
-		fg(C.muted, "think:med"),
+		fg(C.muted, thinkLabel(ctx.thinkingLevel ?? "off")),
 		fg(C.info, (ctx.cwd ?? "").replace(homedir(), "~")),
 		fg(C.ok, G.branch + " " + (footerData?.getGitBranch?.() ?? "—")),
 	].join(sep);
@@ -376,6 +382,16 @@ function registerToolRows(pi: ExtensionAPI, cwd: string) {
 
 // ================================================================= entry ===
 export default function (pi: ExtensionAPI) {
+	// Live handle on the status widget's TUI, so a thinking-level change repaints
+	// the status bar without re-installing the whole chrome.
+	let statusTui: any = null;
+	let stopWatching: (() => void) | undefined;
+
+	// Registered at load time (not per session_start) so repeated session
+	// replacement cannot stack duplicate handlers.
+	pi.on("thinking_level_select", () => { statusTui?.requestRender(); });
+	pi.on("session_shutdown", () => { stopWatching?.(); stopWatching = undefined; });
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
@@ -384,26 +400,32 @@ export default function (pi: ExtensionAPI) {
 			const counts = loadedCounts(ctx.cwd);
 			const sessions = await recentSessions(ctx.cwd);
 
-			// Welcome: overlay (default) / persistent header / off.
-			if (settings.welcome === "overlay") {
-				showWelcomeOverlay(ctx, counts, sessions);
-			} else if (settings.welcome === "header") {
-				try {
+			// Welcome panel: persistent header (default) / one-shot overlay / off.
+			try {
+				if (settings.welcome === "header") {
 					ctx.ui.setHeader((_tui: any, _theme: any) => ({
 						render: (width: number) => welcomePanel(width, counts, sessions, ctx.cwd),
 						invalidate() {},
 					}));
-				} catch (e) { console.debug("[pi-nebula] setHeader failed:", e); }
-			}
+				} else {
+					// Clear a header left behind by a previous mode, then optionally
+					// float the one-shot overlay instead.
+					ctx.ui.setHeader(undefined);
+					if (settings.welcome === "overlay") showWelcomeOverlay(ctx, counts, sessions);
+				}
+			} catch (e) { console.debug("[pi-nebula] setHeader failed:", e); }
 
 			// Design order, top → bottom: STATUS BAR · editor · METRICS BAR.
 			// setFooter always renders below the editor, so the status bar has to be
 			// an above-editor widget (setWidget's default placement).
 			try {
-				ctx.ui.setWidget("nebula-status", (tui: any) => ({
-					invalidate() { tui.requestRender(); },
-					render: (width: number) => [statusBar(width, ctx, cachedFooterData)],
-				}));
+				ctx.ui.setWidget("nebula-status", (tui: any) => {
+					statusTui = tui;
+					return {
+						invalidate() { tui.requestRender(); },
+						render: (width: number) => [statusBar(width, ctx, cachedFooterData)],
+					};
+				});
 			} catch (e) { console.debug("[pi-nebula] setWidget(status) failed:", e); }
 
 			// Blank the built-in bottom footer — the design's last line is the metrics
@@ -434,20 +456,32 @@ export default function (pi: ExtensionAPI) {
 				}
 			} catch (e) { console.debug("[pi-nebula] setEditorComponent failed:", e); }
 
-			try { registerToolRows(pi, ctx.cwd); } catch (e) { console.debug("[pi-nebula] tool rows failed:", e); }
 		};
+
+		// Tool rows are registered once per session: re-registering the same seven
+		// names on every settings change is pointless and noisy.
+		try { registerToolRows(pi, ctx.cwd); } catch (e) { console.debug("[pi-nebula] tool rows failed:", e); }
 
 		await install();
 
 		// Re-read settings / refresh data when settings.json changes on disk
 		// (e.g. after a home-manager switch mid-session). Re-installing chrome is
 		// cheap (all setters are idempotent) and picks up nebula.welcome changes.
+		// Watch settings.json so a home-manager switch mid-session re-applies the
+		// chrome. Closed on session_shutdown — which also fires for reload / new /
+		// fork / quit (docs/extensions.md:516) — and the re-install is guarded: a
+		// watcher that outlives its ctx hits "This extension ctx is stale after
+		// session replacement or reload" and surfaces as an unhandled rejection.
 		try {
 			let timer: any;
-			watch(join(homedir(), ".pi/agent/settings.json"), () => {
+			let disposed = false;
+			const w = watch(join(homedir(), ".pi/agent/settings.json"), () => {
 				clearTimeout(timer);
-				timer = setTimeout(() => { void install(); }, 500);
+				timer = setTimeout(() => {
+					if (!disposed) void install().catch((e) => console.debug("[pi-nebula] re-install failed:", e));
+				}, 500);
 			});
+			stopWatching = () => { disposed = true; clearTimeout(timer); w.close(); };
 		} catch { /* best effort */ }
 	});
 
