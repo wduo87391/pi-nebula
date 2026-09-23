@@ -1,19 +1,41 @@
 {
 	"name": "pi-nebula",
 	"version": "0.1.0",
-	"description": "One chrome extension + one theme for pi: welcome overlay, status bar, metrics bar, editor shell, tool rows — base16 nebula配色.",
+	"description": "One chrome extension + one theme for pi: persistent startup panel, status bar, metrics bar, editor shell, tool rows — base16 nebula palette.",
 	"keywords": [
-		"pi-package"
+		"pi-package",
+		"pi-extension",
+		"pi-theme",
+		"pi",
+		"tui",
+		"theme",
+		"status-bar",
+		"nebula"
 	],
 	"license": "MIT",
 	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/wduo87391/pi-nebula.git"
+	},
+	"homepage": "https://github.com/wduo87391/pi-nebula#readme",
+	"bugs": {
+		"url": "https://github.com/wduo87391/pi-nebula/issues"
+	},
+	"files": [
+		"extensions/nebula.ts",
+		"themes/nebula.json",
+		"README.md",
+		"LICENSE"
+	],
 	"pi": {
 		"extensions": [
 			"./extensions"
 		],
 		"themes": [
 			"./themes"
-		]
+		],
+		"image": "https://raw.githubusercontent.com/wduo87391/pi-nebula/master/docs/preview.png"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",

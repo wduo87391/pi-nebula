@@ -38,6 +38,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // Namespace import on purpose: a single missing named export would otherwise
 // kill the whole module at load time. Everything is read defensively below.
 import * as piPkg from "@earendil-works/pi-coding-agent";
+// Agent config dir — honors PI_CODING_AGENT_DIR (docs/environment-variables.md).
+const getAgentDir: () => string =
+	(piPkg as any).getAgentDir ?? (() => join(homedir(), ".pi/agent"));
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const VERSION: string = (piPkg as any).VERSION ?? "?";
@@ -84,7 +87,7 @@ function readJson(path: string): any {
 function nebulaSettings(cwd: string): { welcome: WelcomeMode } {
 	// No extension API for custom settings keys; read the files directly.
 	// Project settings win over user settings.
-	const user = readJson(join(homedir(), ".pi/agent/settings.json"));
+	const user = readJson(join(getAgentDir(), "settings.json"));
 	const project = readJson(join(cwd, ".pi/settings.json"));
 	const raw = { ...user?.nebula, ...project?.nebula };
 	const welcome: WelcomeMode = raw.welcome === "overlay" || raw.welcome === "off" ? raw.welcome : "header";
@@ -96,10 +99,10 @@ const safeReaddir = (p: string) => { try { return readdirSync(p).length; } catch
 const safeStat = (p: string) => { try { return statSync(p).mtimeMs; } catch { return Date.now(); } };
 
 function loadedCounts(cwd: string) {
-	const home = homedir();
+	const agentDir = getAgentDir();
 	let packages = 0;
 	try {
-		const s = JSON.parse(readFileSync(join(home, ".pi/agent/settings.json"), "utf8"));
+		const s = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
 		packages = Array.isArray(s.packages) ? s.packages.length : 0;
 	} catch { /* ignore */ }
 	let context = 0;
@@ -108,9 +111,9 @@ function loadedCounts(cwd: string) {
 	}
 	return {
 		context,
-		extensions: packages + safeReaddir(join(home, ".pi/agent/extensions")) + safeReaddir(join(cwd, ".pi/extensions")),
-		skills: safeReaddir(join(home, ".pi/agent/skills")),
-		prompts: safeReaddir(join(home, ".pi/agent/prompts")),
+		extensions: packages + safeReaddir(join(agentDir, "extensions")) + safeReaddir(join(cwd, ".pi/extensions")),
+		skills: safeReaddir(join(agentDir, "skills")),
+		prompts: safeReaddir(join(agentDir, "prompts")),
 	};
 }
 
@@ -681,7 +684,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			let timer: any;
 			let disposed = false;
-			const w = watch(join(homedir(), ".pi/agent/settings.json"), () => {
+			const w = watch(join(getAgentDir(), "settings.json"), () => {
 				clearTimeout(timer);
 				timer = setTimeout(() => {
 					if (!disposed) void install().catch((e) => console.debug("[pi-nebula] re-install failed:", e));

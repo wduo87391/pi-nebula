@@ -6,6 +6,8 @@
 
 配色是 base16「nebula」（蓝紫青冷调深色），与桌面 stylix 方案同源，静态写在 `themes/nebula.json` 里。
 
+![pi-nebula 预览](docs/preview.png)
+
 ## 安装
 
 ```bash
@@ -57,7 +59,7 @@ pi install git:github.com/wduo87391/pi-nebula@<commit>
 
 ## 要求
 
-- **Nerd Font** —— 图标用的是 Nerd Font 私有区码位（`` `` `` ` ` `` 等）
+- **Nerd Font**（必需，非可选）—— 状态条/工具行图标用的是 Nerd Font 私有区码位（`` `` `` ` ` `` 等）。未安装 Nerd Font 的终端会把这些码位渲染为豆腐块或乱码；没有降级 fallback，不想装字体请勿使用本包
 - **真彩色终端** —— 颜色以 raw truecolor ANSI 输出（`COLORTERM=truecolor`）
 - 终端宽度会变，本包**不写死任何列数**；一律走 pi 自己的 `visibleWidth()` / `truncateToWidth()`
 
