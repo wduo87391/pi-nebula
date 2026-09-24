@@ -15,6 +15,11 @@
  *                        renderShell: "self" (no box/background): a call line
  *                        "● Name  [arg • arg]  42ms" plus a "└ summary" result
  *                        line; raw output only when the row is expanded.
+ *                        The exported createXToolDefinition factories are also
+ *                        patched (wrapBuiltinFactories) so another extension that
+ *                        re-registers a built-in and delegates rendering back to
+ *                        the factory inherits these rows instead of the built-in
+ *                        renderer — see docs/adr/0005-tool-row-composition.md.
  *   user messages      → pi.registerMarkdownTransformer() prepends the design's
  *                        "❯ " marker. Built-in message renderers are not
  *                        replaceable, so this is the only hook that reaches them.
@@ -513,13 +518,71 @@ function toolResultRow(width: number, name: string, args: any, result: any, isPa
 	return lines;
 }
 
+// Built-in tools nebula re-draws, paired with the exported factory that builds
+// each definition.
+const BUILTIN_TOOLS: [string, string][] = [
+	["read", "createReadToolDefinition"], ["write", "createWriteToolDefinition"], ["edit", "createEditToolDefinition"],
+	["grep", "createGrepToolDefinition"], ["find", "createFindToolDefinition"], ["ls", "createLsToolDefinition"],
+	["bash", "createBashToolDefinition"],
+];
+
+// The row renderers for one tool. Shared by registerToolRows() (to override the
+// built-in tools pi builds internally) and wrapBuiltinFactories() (to compose
+// with other extensions that build on the exported factories).
+function toolRenderers(name: string) {
+	return {
+		renderCall(args: any, _theme: any, context: any) {
+			// t0 is captured once; endedAt freezes the duration on the first
+			// non-partial render so the row does not keep counting after it settles.
+			const state = context.state;
+			if (context.executionStarted && state.t0 === undefined) state.t0 = Date.now();
+			if (!context.isPartial && state.t0 !== undefined && state.endedAt === undefined) state.endedAt = Date.now();
+			const ms = state.t0 !== undefined ? (state.endedAt ?? Date.now()) - state.t0 : null;
+			return rowComponent((w) => [toolCallRow(w, name, args, ms, !!context.isError)]);
+		},
+		renderResult(result: any, opts: any, _theme: any, context: any) {
+			return rowComponent((w) =>
+				toolResultRow(w, name, context.args, result, !!opts?.isPartial, !!opts?.expanded, !!context.isError),
+			);
+		},
+	};
+}
+
+// ------------------------------------------------- factory composition --
+// pi resolves rendering last-registered-wins and does NOT compose renderers
+// across extensions. Any extension that re-registers a built-in tool (SoL-Pi's
+// Action Fusion adds `then_run` to edit/write) silently steals the slot and,
+// because it delegates rendering back to the built-in factory, falls back to
+// pi's own renderer.
+//
+// Patch the *exported* factories on the shared module namespace so the
+// definitions they return already carry nebula's rows. Extensions that build on
+// those factories then inherit nebula's rendering. pi's own built-in tools are
+// built from internal references and are unaffected, so registerToolRows() is
+// still required. Guarded: if a future pi freezes the namespace, we log and
+// keep the registerToolRows() behaviour.
+function wrapBuiltinFactories() {
+	for (const [name, factoryName] of BUILTIN_TOOLS) {
+		try {
+			const orig = (piPkg as any)[factoryName];
+			if (typeof orig !== "function" || (orig as any).__nebulaWrapped) continue;
+			const rows = toolRenderers(name);
+			const wrapped: any = (cwd: string, opts?: any) => ({
+				...orig(cwd, opts),
+				renderShell: "self",
+				renderCall: rows.renderCall,
+				renderResult: rows.renderResult,
+			});
+			wrapped.__nebulaWrapped = true;
+			Object.defineProperty(piPkg, factoryName, { configurable: true, enumerable: true, value: wrapped });
+		} catch (e) {
+			console.debug(`[pi-nebula] factory composition skipped for ${factoryName}:`, e);
+		}
+	}
+}
+
 function registerToolRows(pi: ExtensionAPI, cwd: string) {
-	const names: [string, string][] = [
-		["read", "createReadToolDefinition"], ["write", "createWriteToolDefinition"], ["edit", "createEditToolDefinition"],
-		["grep", "createGrepToolDefinition"], ["find", "createFindToolDefinition"], ["ls", "createLsToolDefinition"],
-		["bash", "createBashToolDefinition"],
-	];
-	for (const [name, factoryName] of names) {
+	for (const [name, factoryName] of BUILTIN_TOOLS) {
 		try {
 			const make = (piPkg as any)[factoryName];
 			if (typeof make !== "function") {
@@ -527,6 +590,7 @@ function registerToolRows(pi: ExtensionAPI, cwd: string) {
 				continue;
 			}
 			const def = make(cwd);
+			const rows = toolRenderers(name);
 			pi.registerTool({
 				name,
 				label: (def as any).label ?? name,
@@ -543,20 +607,7 @@ function registerToolRows(pi: ExtensionAPI, cwd: string) {
 				// line above them from ToolExecutionComponent, which matches the design gap.
 				renderShell: "self",
 				async execute(...a: any[]) { return (def as any).execute(...a); },
-				renderCall(args: any, _theme: any, context: any) {
-					// t0 is captured once; endedAt freezes the duration on the first
-					// non-partial render so the row does not keep counting after it settles.
-					const state = context.state;
-					if (context.executionStarted && state.t0 === undefined) state.t0 = Date.now();
-					if (!context.isPartial && state.t0 !== undefined && state.endedAt === undefined) state.endedAt = Date.now();
-					const ms = state.t0 !== undefined ? (state.endedAt ?? Date.now()) - state.t0 : null;
-					return rowComponent((w) => [toolCallRow(w, name, args, ms, !!context.isError)]);
-				},
-				renderResult(result: any, opts: any, _theme: any, context: any) {
-					return rowComponent((w) =>
-						toolResultRow(w, name, context.args, result, !!opts?.isPartial, !!opts?.expanded, !!context.isError),
-					);
-				},
+				...rows,
 			} as any);
 		} catch (e) {
 			console.debug(`[pi-nebula] tool override failed for ${name}:`, e);
@@ -584,6 +635,10 @@ function markUserMessage(markdown: string): string {
 
 // ================================================================= entry ===
 export default function (pi: ExtensionAPI) {
+	// Compose with other extensions that build on the exported built-in factories
+	// (see wrapBuiltinFactories). Must run before any session_start handler.
+	wrapBuiltinFactories();
+
 	// Live handle on the status widget's TUI, so a thinking-level change repaints
 	// the status bar without re-installing the whole chrome.
 	let statusTui: any = null;
