@@ -61,6 +61,20 @@ LaTeX 的 Unicode 渲染自 0.84.0 内置、无设置开关（0.85.1→0.86.0 �
 
 **升级 pi（0.85.1 → 0.99.2，经 pi.nix）并过「升级回归项」→ C → D。**（原 B→A 已取消：宿主已内置。）
 
+## 升级验收记录（2026-10-01，0.85.1 → 0.99.2 实测）
+
+升级经 `~/.dotfiles` flake input `llm-agents`（commit `202b98c`）。
+
+- **工厂补丁（ADR-0005）：存活**。四探针实测：命名空间未冻结、descriptor 仍 `configurable:true` + getter、`defineProperty` 成功；跨扩展具名导入读到补丁后的工厂（含 `promptSnippet`/`promptGuidelines`/`renderCall` 全字段）；**从 SoL-Pi 自己的树**（其 node_modules 有 pi 包本地副本）编译的导入仍解析到宿主命名空间。无需 `linked-method-patch` 备选。已知怪癖：补丁文件自身的 namespace 读回返回原函数（同文件编译的快照效应），`registerToolRows` 与防重入检查对此不敏感，无碍。探针留在 `.scratch/regression/`（gitignore）。
+- **工具行：过**。真机会话 `read` 调用渲染为 nebula 行（`● Read [README.md • lines 1–5] 6ms` + `└ Read 5 lines`），❯ 用户标记在位。
+- **UI 槽位：过**。欢迎面板（Ciallo/banner/Tips/Loaded/Recent）、状态条、metrics 条全部渲染。注意：`ctx.ui.setHeader()` 语义未变（探针 H 验证）。
+- **主题：过**。静态 hex 不受 OKHSL 重写影响；#9973 真彩修复生效。
+- **`--no-extensions`/`-e` 新语义：兼容**（探针运行方式本身即验证）。
+- **ContextEditEntry（0.87）：安全**（过滤式遍历，维持 ADR 判断）。
+- **未决项**：`embedWorkingStatus` opt-in 与 `pi.on()` unsubscribe 简化——并入功能 C/D 实施时处理。
+- **第三方新警告（非 nebula）**：0.99.2 加载器要求宿主包声明为 peerDependencies——`@juicesharp/rpiv-*` 两个包违规告警；`pi-mcp-adapter` 的 `/mcp` 命令与 `builtin:mcp` 冲突提示（既有）。
+- **验收现场备注**：小屏（50 行）下面板顶部会被截断（面板 19 行 + [Skills]/[Extensions] 列表很长），非缺陷。
+
 ## Considered Options
 
 - ~~自写 mermaid/latex 转换器~~ ——已被更强理由取代：pi 自 0.84.0 内置主题化渲染，重复造轮子毫无必要，nebula 只需验证观感。

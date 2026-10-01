@@ -5,3 +5,6 @@ node_modules/
 HANDOFF.md
 prototype/
 ChatGPT Image *.png
+
+# Local agent working files (tickets, regression probes).
+.scratch/
