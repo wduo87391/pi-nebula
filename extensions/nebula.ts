@@ -23,22 +23,38 @@
  *   user messages      → pi.registerMarkdownTransformer() prepends the design's
  *                        "❯ " marker. Built-in message renderers are not
  *                        replaceable, so this is the only hook that reaches them.
+ *   working indicator  → ctx.ui.setWorkingIndicator() — cold-tone breathing
+ *                        frames for the streaming spinner (ADR-0006 C). pi
+ *                        drives the frame loop itself; embedded into the
+ *                        editor's top border via { embedWorkingStatus: true }
+ *                        (CustomEditor's 4th ctor arg) to match pi 0.99.2's
+ *                        own default editor.
+ *   update self-check   → ADR-0006 D: once a day, fire-and-forget
+ *                        `git ls-remote --tags` vs our own package.json;
+ *                        a newer tag surfaces as ctx.ui.setStatus("nebula", …),
+ *                        which this footer renders dim. Never auto-updates.
  *
  * Colors are the base16 "nebula" scheme (same values as themes/nebula.json),
  * emitted as raw truecolor ANSI. The chrome and the theme ship together as one
  * package, so the two can never drift.
  *
  * Configuration (settings.json → "nebula" key, per ADR-0002):
- *   { "welcome": "header" | "overlay" | "off" }   default "header"
+ *   { "welcome": "header" | "overlay" | "off" }        default "header"
+ *   { "embedWorkingStatus": boolean }                   default true
  *
- * /nebula-off restores pi's built-in header/footer/widgets/editor for the
- * current session. Width is never hardcoded: pi re-calls render(width) on
- * resize, and all trimming goes through pi's own visibleWidth/truncateToWidth.
+ * /nebula-off restores pi's built-in header/footer/widgets/editor — and the
+ * default working spinner, plus our status-bar hint — for the current session;
+ * session_shutdown restores the spinner too, in case the extension is gone by
+ * the next session.
+ * Width is never hardcoded: pi re-calls render(width) on resize, and all
+ * trimming goes through pi's own visibleWidth/truncateToWidth.
  */
 
-import { readdirSync, readFileSync, statSync, watch } from "node:fs";
+import { execFile } from "node:child_process";
+import { readdirSync, readFileSync, statSync, watch, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // Namespace import on purpose: a single missing named export would otherwise
 // kill the whole module at load time. Everything is read defensively below.
@@ -57,7 +73,7 @@ const SessionManager: any = (piPkg as any).SessionManager;
 const C = {
 	panel: "131c26", sel: "1b2834", dim: "30465b", muted: "5d7a96",
 	text: "c9d8e8", bright: "e8f1f8", white: "ffffff",
-	accent: "ff6ad5", warn: "ffe08a", ok: "7de4ff", info: "9cd9ff", key: "c48dff",
+	accent: "ff6ad5", warn: "ffe08a", ok: "7de4ff", cyan: "8bf0ff", info: "9cd9ff", key: "c48dff",
 };
 const rgb = (h: string) => `${parseInt(h.slice(0, 2), 16)};${parseInt(h.slice(2, 4), 16)};${parseInt(h.slice(4, 6), 16)}`;
 const fg = (c: string, s: string) => `\x1b[38;2;${rgb(c)}m${s}\x1b[39m`;
@@ -89,14 +105,17 @@ function readJson(path: string): any {
 	try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
 }
 
-function nebulaSettings(cwd: string): { welcome: WelcomeMode } {
+function nebulaSettings(cwd: string): { welcome: WelcomeMode; embedWorkingStatus: boolean } {
 	// No extension API for custom settings keys; read the files directly.
 	// Project settings win over user settings.
 	const user = readJson(join(getAgentDir(), "settings.json"));
 	const project = readJson(join(cwd, ".pi/settings.json"));
 	const raw = { ...user?.nebula, ...project?.nebula };
 	const welcome: WelcomeMode = raw.welcome === "overlay" || raw.welcome === "off" ? raw.welcome : "header";
-	return { welcome };
+	// 0.86.0+ streams the working spinner into the editor's top border when the
+	// editor opts in; pi's own default editor does. Match it unless told not to.
+	const embedWorkingStatus = raw.embedWorkingStatus === false ? false : true;
+	return { welcome, embedWorkingStatus };
 }
 
 // ------------------------------------------------------------------- data --
@@ -283,7 +302,14 @@ function statusBar(width: number, ctx: any, footerData: any): string {
 		fg(C.ok, G.branch + " " + (footerData?.getGitBranch?.() ?? "—")),
 	].join(sep);
 	const now = new Date();
-	const right = [fg(C.muted, `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`)].join(sep);
+	// Extension statuses (ctx.ui.setStatus entries — ours and other extensions';
+	// the ADR-0002 seam). Plain text renders dim; text that already carries ANSI
+	// goes through untouched.
+	const statuses: string[] = [];
+	const extStatuses = footerData?.getExtensionStatuses?.();
+	if (extStatuses && typeof extStatuses.forEach === "function")
+		extStatuses.forEach((t: string) => { if (t) statuses.push(/\x1b\[/.test(t) ? t : fg(C.dim, t)); });
+	const right = [...statuses, fg(C.muted, `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`)].join(sep);
 	return ind + fit(lr(left, right, w), w);
 }
 
@@ -633,6 +659,101 @@ function markUserMessage(markdown: string): string {
 	return lines.join("\n");
 }
 
+// -------------------------------------------------- working indicator --
+// Cold-tone breathing animation for pi's streaming spinner (ADR-0006 item C).
+// pi drives the frame loop itself (docs/extensions.md setWorkingIndicator), so
+// there is no repaint risk — we only supply frames. The dot breathes
+// · → • → ● while the hue sweeps the nebula cold range (base0B → 0C → 0D → 0E);
+// exact form is up to visual acceptance (ADR: “具体形态目视验收定”).
+const WORKING_FRAMES: string[] = [
+	fg(C.muted, "·"),
+	fg(C.ok, "•"),
+	fg(C.info, "●"),
+	fg(C.cyan, "●"),
+	fg(C.key, "●"),
+	fg(C.info, "●"),
+	fg(C.ok, "•"),
+	fg(C.muted, "·"),
+];
+const WORKING_INTERVAL_MS = 120;
+
+// ------------------------------------------------- update self-check --
+// ADR-0006 D: once a day, fire-and-forget `git ls-remote --tags` against the
+// package repo, compare the highest semver tag with our own package.json, and
+// surface a hint through ctx.ui.setStatus(). The running copy's version
+// comes from __filename (probe-verified under pi's jiti loader — see
+// ownVersion); npm layout, git pin, and local dev checkout all report
+// truthfully. Discipline: hint only, never auto-update (the pin in
+// settings.json stays); every failure mode (no git, no network, 3s timeout,
+// unparseable output) is silent, and nextCheck advances *before* the attempt,
+// so a failure costs nothing for another 24h.
+const UPDATE_REPO = "https://github.com/wduo87391/pi-nebula.git";
+const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_TIMEOUT_MS = 3000;
+
+const semverOf = (s: string | undefined): number[] | undefined => {
+	const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(s ?? "");
+	return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined;
+};
+const cmpSemver = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+// Highest pure "vX.Y.Z" tag from `git ls-remote --tags` output. Annotated tags
+// also emit a "refs/tags/vX.Y.Z^{}" line for the peeled commit — ignored; the
+// plain ref already carries the same version.
+export function highestSemverTag(lsRemoteOut: string): string | undefined {
+	let best: number[] | undefined, bestTag: string | undefined;
+	for (const line of lsRemoteOut.split("\n")) {
+		const m = /^[0-9a-f]{40}\s+refs\/tags\/v(\d+)\.(\d+)\.(\d+)$/.exec(line.trim());
+		if (!m) continue;
+		const v = [Number(m[1]), Number(m[2]), Number(m[3])];
+		if (!best || cmpSemver(v, best) > 0) { best = v; bestTag = `v${m[1]}.${m[2]}.${m[3]}`; }
+	}
+	return bestTag;
+}
+
+// "⬆ v0.1.0 → v0.2.0" when the remote tag is strictly newer; undefined
+// otherwise (equal, older, or unparseable on either side).
+export function updateHint(localVersion: string | undefined, remoteTag: string | undefined): string | undefined {
+	const a = semverOf(localVersion), b = semverOf(remoteTag);
+	if (!a || !b || cmpSemver(b, a) <= 0) return undefined;
+	return `⬆ v${a.join(".")} → v${b.join(".")}`;
+}
+
+function ownVersion(): string | undefined {
+	try {
+		// nebula.ts lives in extensions/, the manifest one level up.
+		//
+		// PROBE VERIFIED (pi 0.99.2, live --extension run): pi's jiti loader wraps
+		// extension modules in CJS and injects a correct __filename — while
+		// import.meta.url is a garbage base64 data-URL ("file:///data:text/…"),
+		// so fileURLToPath(import.meta.url) would silently read a nonexistent
+		// manifest and the update check would never fire. __filename first; the
+		// import.meta.url fallback only serves non-jiti contexts (node ESM, the
+		// offline smoke harness), where it is a proper file URL.
+		const here = typeof __filename === "string"
+			? __filename
+			: fileURLToPath((import.meta as any).url as string);
+		return readJson(join(dirname(here), "..", "package.json"))?.version;
+	} catch { return undefined; }
+}
+
+function maybeCheckForUpdate(ctx: any): void {
+	const statePath = join(getAgentDir(), "nebula-update.json");
+	try {
+		const s = readJson(statePath);
+		if (s && typeof s.nextCheck === "number" && s.nextCheck > Date.now()) return; // throttled
+	} catch { /* unreadable state = due */ }
+	// Advance nextCheck before the attempt: success or failure, tomorrow is
+	// the earliest re-check (the “无论成败先推进” discipline from ADR-0006).
+	try { writeFileSync(statePath, JSON.stringify({ nextCheck: Date.now() + UPDATE_INTERVAL_MS })); } catch { /* worst case: re-check next session */ }
+	execFile("git", ["ls-remote", "--tags", UPDATE_REPO], { timeout: UPDATE_TIMEOUT_MS }, (err, stdout) => {
+		if (err) return; // no git / no network / timeout — silent by design
+		const hint = updateHint(ownVersion(), highestSemverTag(String(stdout ?? "")));
+		if (!hint) return;
+		try { ctx?.ui?.setStatus?.("nebula", hint); } catch { /* non-fatal */ }
+	});
+}
+
 // ================================================================= entry ===
 export default function (pi: ExtensionAPI) {
 	// Compose with other extensions that build on the exported built-in factories
@@ -647,7 +768,16 @@ export default function (pi: ExtensionAPI) {
 	// Registered at load time (not per session_start) so repeated session
 	// replacement cannot stack duplicate handlers.
 	pi.on("thinking_level_select", () => { statusTui?.requestRender(); });
-	pi.on("session_shutdown", () => { stopWatching?.(); stopWatching = undefined; });
+	pi.on("session_shutdown", (_event, ctx) => {
+		stopWatching?.();
+		stopWatching = undefined;
+		// Restore pi's default spinner/message in case the next session loads
+		// without nebula (extension removed or disabled between sessions).
+		try {
+			(ctx as any)?.ui?.setWorkingIndicator?.(undefined);
+			(ctx as any)?.ui?.setWorkingMessage?.(undefined);
+		} catch { /* best effort — ctx may already be stale */ }
+	});
 
 	// "❯ " marker on user messages (see markUserMessage). Display-only.
 	try {
@@ -714,11 +844,25 @@ export default function (pi: ExtensionAPI) {
 
 			try {
 				if (NebulaEditor) {
-					ctx.ui.setEditorComponent((tui: any, theme: any, kb: any) => new NebulaEditor(tui, theme, kb));
+					ctx.ui.setEditorComponent((tui: any, theme: any, kb: any) =>
+						new NebulaEditor(tui, theme, kb, { embedWorkingStatus: settings.embedWorkingStatus }));
 				} else {
 					console.debug("[pi-nebula] CustomEditor unavailable; skipping editor shell");
 				}
 			} catch (e) { console.debug("[pi-nebula] setEditorComponent failed:", e); }
+
+			// Working indicator: our frames, pi's frame loop. CustomEditor's 4th ctor
+			// arg ({ embedWorkingStatus }) streams the animation into the editor's top
+			// border (pi 0.86.0+); without it the spinner lives on the loader line.
+			// Both restore points call setWorkingIndicator(undefined) = pi's default.
+			try {
+				ctx.ui.setWorkingIndicator?.({ frames: WORKING_FRAMES, intervalMs: WORKING_INTERVAL_MS });
+				ctx.ui.setWorkingMessage?.(fg(C.muted, "Working…"));
+			} catch (e) { console.debug("[pi-nebula] setWorkingIndicator failed:", e); }
+
+			// Update self-check (ADR-0006 D): throttled to daily, fire-and-forget,
+			// fully silent on failure — must never disturb session start.
+			try { maybeCheckForUpdate(ctx); } catch { /* never break install */ }
 
 		};
 
@@ -757,6 +901,11 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setWidget("nebula-status", undefined);
 			ctx.ui.setWidget("nebula-metrics", undefined);
 			ctx.ui.setEditorComponent(undefined);
+			try {
+				ctx.ui.setWorkingIndicator?.(undefined);
+				ctx.ui.setWorkingMessage?.(undefined);
+				ctx.ui.setStatus?.("nebula", undefined);
+			} catch { /* best effort */ }
 			ctx.ui.notify("pi-nebula disabled for this session", "info");
 		},
 	});

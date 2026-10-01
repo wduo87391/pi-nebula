@@ -1,6 +1,6 @@
 {
 	"name": "pi-nebula",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "One chrome extension + one theme for pi: persistent startup panel, status bar, metrics bar, editor shell, tool rows — base16 nebula palette.",
 	"keywords": [
 		"pi-package",

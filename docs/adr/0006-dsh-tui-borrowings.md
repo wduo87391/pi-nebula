@@ -1,6 +1,6 @@
 # 从 dsh-TUI 借鉴四个功能，其余记档缓做或拒绝
 
-> **2026-10-01 修订**：升级调查发现 pi **0.84.0 已内置 Mermaid/LaTeX 的 Unicode 渲染**（引擎 `grok-mermaid`；`markdown.mermaid` 设置，默认 `"streaming"`；LaTeX 内置无开关），即原采纳项 A、B 已被宿主取代——不做，改为升级后验证观感。四项只剩 C（活动动画）与 D（更新自检）待实施。
+> **2026-10-01 修订**：升级调查发现 pi **0.84.0 已内置 Mermaid/LaTeX 的 Unicode 渲染**（引擎 `grok-mermaid`；`markdown.mermaid` 设置，默认 `"streaming"`；LaTeX 内置无开关），即原采纳项 A、B 已被宿主取代——不做。四项全部落定：A/B 宿主取代，C（活动动画）与 D（更新自检）已实施，均待目视验收（见下「实施记录 C/D」）。
 
 调研记录在 `docs/research-dsh-tui.md`（对照 pi-nebula 的完整 20 条清单）。本 ADR 记取舍结论、待实施功能的要点、以及 pi 升级的必回归项。
 
@@ -60,6 +60,31 @@ LaTeX 的 Unicode 渲染自 0.84.0 内置、无设置开关（0.85.1→0.86.0 �
 ## 实施顺序
 
 **升级 pi（0.85.1 → 0.99.2，经 pi.nix）并过「升级回归项」→ C → D。**（原 B→A 已取消：宿主已内置。）
+
+## 实施记录 C（2026-10-01，已实施待目视验收）
+
+- **动画形态**：8 帧呼吸 `·•●●●●•·`，intervalMs 120；色相沿冷调扫掠 base04（muted）→ base0B（ok）→ base0D（info）→ base0C（cyan）→ base0E（key）→ 回落。帧由 nebula 自带 `fg()` 真彩 ANSI 生成，与扩展其余部分同源；pi 自己驱动帧循环。
+- **接入点**：`install()` 里 `ctx.ui.setWorkingIndicator?.({ frames, intervalMs })` + `setWorkingMessage?.(fg(C.muted, "Working…"))`，均带防御，不存在的宿主版本静默跳过。
+- **还原点**：`/nebula-off` 与 `session_shutdown` 均调 `setWorkingIndicator(undefined)` / `setWorkingMessage(undefined)`（官方示例的 reset 形式；session_shutdown 供下次会话不装 nebula 时回到内置 spinner）。
+- **未决项「embedWorkingStatus」已落地**：实测 pi 0.99.2 自带默认编辑器即传 `{ embedWorkingStatus: true }`（spinner 流入编辑器顶边框，0.86.0+）。nebula 跟随宿主默认，同时新增设置键 `nebula.embedWorkingStatus`（默认 true，false 回退老观感），目视验收后可一键切换。
+- **未决项「pi.on() unsubscribe」结论：无需改**。现存两个 `pi.on` 均为加载期注册、跨会话复用（注释明确设计如此）；每会话态资源只有 fs watcher，本就在 session_shutdown 手动销毁，无可简化处。
+- **离线 smoke**：`/tmp/nebula-verify` harness 已扩展覆盖：帧数/间隔/真彩 ANSI、message、embedWorkingStatus 默认 true → 设置 false → 移除恢复、`/nebula-off` 还原、session_shutdown 还原；全部通过，既有检查（三宽度、welcome 三模式、thinking 联动、工具行）无回归。stub `@earendil-works/*` 包重建入库 harness 目录。
+- **部署提醒**：`npm:pi-nebula@0.1.0`（`~/.pi/agent/npm/…`）与 git 钉版副本均落后于仓库（连 ADR-0005 的工厂补丁都未含）。目视验收前需先同步安装副本或发新版，否则改的都是仓库里的代码、跑的是旧包。
+- 遗留给目视验收：动画具体形态（呼吸 vs 扫掠）、`Working…` 文案取舍、embedWorkingStatus 开/关观感对比。
+- **Review 补验（同日）**：`emit(event)` 统一传 `(event, ctx)`（0.99.2 宿主反汇编确认），session_shutdown 里的 `ctx.ui` 还原可用；NebulaEditor 无自有构造器，`{ embedWorkingStatus }` 经默认继承直通 CustomEditor 第 4 参；完整扩展已在生产 jiti 下加载冒烟通过（exit 0、无报错）。
+
+## 实施记录 D（2026-10-01，已实施待目视验收）
+
+- **接入点**：`install()` 尾部 `maybeCheckForUpdate(ctx)`，fire-and-forget，外层 try/catch 全包，任何异常不打断 session start。
+- **节流**：状态文件 `getAgentDir()/nebula-update.json`（`{ nextCheck }`）；**先推进后查询**——无论成败下次检查都在 24h 后，无网/无 git 的失败零成本；文件缺失/不可读 = 视为 due。
+- **查询**：`execFile("git", ["ls-remote", "--tags", REPO], { timeout: 3000 })`。任何错误（无 git、无网、超时、输出不可解析）完全静默，不留任何 UI 痕迹。
+- **版本来源**：`__filename` → `../package.json`。**Review 探针实测**（pi 0.99.2 jiti，真机 `--extension` 加载）推翻了初版的 `import.meta.url` 方案：jiti 把扩展模块包在 CJS 里并注入正确的 `__filename`，而 `import.meta.url` 是一坨 base64 data-URL 垃圾（`file:///data:text/…`），用它拼路径会静默读不到 manifest，更新自检永不触发——离线 harness 在纯 node 下跑，`import.meta.url` 恰好是对的，环境差异掩盖了 bug。现改为 `__filename` 优先、`import.meta.url` 仅作非 jiti 环境（node ESM / harness）回退，修复后已在生产同款 jiti 环境下验证返回真实版本号。npm 布局 / git 钉版 / 本地 dev checkout 都如实报告自身版本。
+- **提示**：`ctx.ui.setStatus("nebula", "⬆ v0.1.0 → v0.2.0")`，纯文本不携 ANSI——宿主 `setExtensionStatus` 后会 `requestRender()`（实测确认），dim 由状态条着色。纪律不变：只提示，绝不自动升级。
+- **附带修复**：statusBar 现在渲染 `footerData.getExtensionStatuses()`（右侧、dim；自带 ANSI 的透传）。此前 nebula 换掉内置 footer 后，其他扩展的 `setStatus` 会石沉大海，这把 ADR-0002 的对接缝真正接通了。
+- **`/nebula-off`**：顺带 `setStatus("nebula", undefined)` 清掉自己的提示，恢复 vanilla。
+- **可测性**：纯函数 `highestSemverTag` / `updateHint` 以命名导出供 harness 单测（annotated tag 的 `^{}` 行忽略）。
+- **离线 smoke**：stub `git`（记录调用次数 + 罐头 tags）→ 8+ 次 session_start 只查 1 次；future nextCheck 完全抑制查询；提示出现在状态条各 think 档位行；`/nebula-off` 清除；全部通过，既有检查无回归。harness 副本改为 `extensions/` 子目录以镜像真实布局（`ownVersion()` 读 `../package.json`）。
+- **发版纪律**：打 `vX.Y.Z` 格式的 tag 即可被检测（当前仓库版本 0.1.0）。目视验收项：真实网络下首查 3s 内完成、无网环境完全静默。
 
 ## 升级验收记录（2026-10-01，0.85.1 → 0.99.2 实测）
 
