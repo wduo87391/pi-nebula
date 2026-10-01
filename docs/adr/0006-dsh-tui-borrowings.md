@@ -86,6 +86,17 @@ LaTeX 的 Unicode 渲染自 0.84.0 内置、无设置开关（0.85.1→0.86.0 �
 - **离线 smoke**：stub `git`（记录调用次数 + 罐头 tags）→ 8+ 次 session_start 只查 1 次；future nextCheck 完全抑制查询；提示出现在状态条各 think 档位行；`/nebula-off` 清除；全部通过，既有检查无回归。harness 副本改为 `extensions/` 子目录以镜像真实布局（`ownVersion()` 读 `../package.json`）。
 - **发版纪律**：打 `vX.Y.Z` 格式的 tag 即可被检测（当前仓库版本 0.1.0）。目视验收项：真实网络下首查 3s 内完成、无网环境完全静默。
 
+## 修订（2026-10-01，目视验收后调整）
+
+目视验收否掉了 C 的首版形态，并收紧了 D 的展示面：
+
+- **C 动画形态换掉**：原 8 帧 `·•●●●●•·` 冷调扫色被否（“太丑，还不如原来的”）。改为**紫色 ◆ 呼吸**：accent 菱形 `◆`，沿自身明度 ramp 呼吸（`6b2f5a → 9c3f7f → cc52a4 → ff6ad5 → ff9ae4 →` 回落），`intervalMs 110`，不再扫色相。`setWorkingMessage("Working…")` 一并去掉，只留 ◆ 本身。
+- **embedWorkingStatus 默认反转**：目视反馈 spinner 嵌进编辑器顶边框（工作区内）是干扰，`nebula.embedWorkingStatus` **默认改为 false**（opt-in），spinner 回到 pi 自己的 loader 行。
+- **D 展示面收窄**：`getExtensionStatuses()` 是 `Map<key,text>`。状态条**只渲染 nebula 自己的 key（更新提示）**，其他扩展的 status（`search:` / `DS cache` / `usage`）不再上顶栏——那堆是噪声。
+- **余额挪到底部**：pi-usage 的 `usage` 状态改由 metrics bar 渲染成 `balance <金额>`，对应设计稿 metrics bar 的 `balance $12.40` 槽位。值因 provider 而异（`r4coder $79.12` / `openrouter $12.40 left` …），用正则只抽币种金额（`/([$€£¥₹]\s?[\d,]+(?:\.\d+)?)/`），抽不到就原样显示。
+- **连带**：调色板去掉只被旧 spinner 使用的 `cyan`。
+- **离线 smoke**：`/tmp/nebula-verify` 已同步覆盖新形态（帧 = `◆◆◆◆◆◆◆◆`、`intervalMs 110`、message 不再设置、embed 默认 false → 设置 true → 移除回 false、状态条不泄露其他扩展 status、metrics bar 出现 balance），全部通过。
+
 ## 升级验收记录（2026-10-01，0.85.1 → 0.99.2 实测）
 
 升级经 `~/.dotfiles` flake input `llm-agents`（commit `202b98c`）。

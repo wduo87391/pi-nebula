@@ -23,16 +23,19 @@
  *   user messages      → pi.registerMarkdownTransformer() prepends the design's
  *                        "❯ " marker. Built-in message renderers are not
  *                        replaceable, so this is the only hook that reaches them.
- *   working indicator  → ctx.ui.setWorkingIndicator() — cold-tone breathing
- *                        frames for the streaming spinner (ADR-0006 C). pi
- *                        drives the frame loop itself; embedded into the
- *                        editor's top border via { embedWorkingStatus: true }
- *                        (CustomEditor's 4th ctor arg) to match pi 0.99.2's
- *                        own default editor.
+ *   working indicator  → ctx.ui.setWorkingIndicator() — a purple ◆ breathing
+ *                        pulse for the streaming spinner (ADR-0006 C). pi drives
+ *                        the frame loop itself; NOT embedded into the editor's
+ *                        top border (embedWorkingStatus defaults off), so it
+ *                        stays on pi's own loader line.
  *   update self-check   → ADR-0006 D: once a day, fire-and-forget
  *                        `git ls-remote --tags` vs our own package.json;
  *                        a newer tag surfaces as ctx.ui.setStatus("nebula", …),
- *                        which this footer renders dim. Never auto-updates.
+ *                        which the status bar renders dim. Never auto-updates.
+ *                        Other extensions' setStatus entries are NOT shown —
+ *                        only nebula's own hint rides the status bar. The
+ *                        balance (pi-usage's "usage" status) is relocated to
+ *                        the metrics bar's balance slot.
  *
  * Colors are the base16 "nebula" scheme (same values as themes/nebula.json),
  * emitted as raw truecolor ANSI. The chrome and the theme ship together as one
@@ -40,7 +43,7 @@
  *
  * Configuration (settings.json → "nebula" key, per ADR-0002):
  *   { "welcome": "header" | "overlay" | "off" }        default "header"
- *   { "embedWorkingStatus": boolean }                   default true
+ *   { "embedWorkingStatus": boolean }                   default false
  *
  * /nebula-off restores pi's built-in header/footer/widgets/editor — and the
  * default working spinner, plus our status-bar hint — for the current session;
@@ -73,7 +76,7 @@ const SessionManager: any = (piPkg as any).SessionManager;
 const C = {
 	panel: "131c26", sel: "1b2834", dim: "30465b", muted: "5d7a96",
 	text: "c9d8e8", bright: "e8f1f8", white: "ffffff",
-	accent: "ff6ad5", warn: "ffe08a", ok: "7de4ff", cyan: "8bf0ff", info: "9cd9ff", key: "c48dff",
+	accent: "ff6ad5", warn: "ffe08a", ok: "7de4ff", info: "9cd9ff", key: "c48dff",
 };
 const rgb = (h: string) => `${parseInt(h.slice(0, 2), 16)};${parseInt(h.slice(2, 4), 16)};${parseInt(h.slice(4, 6), 16)}`;
 const fg = (c: string, s: string) => `\x1b[38;2;${rgb(c)}m${s}\x1b[39m`;
@@ -112,9 +115,10 @@ function nebulaSettings(cwd: string): { welcome: WelcomeMode; embedWorkingStatus
 	const project = readJson(join(cwd, ".pi/settings.json"));
 	const raw = { ...user?.nebula, ...project?.nebula };
 	const welcome: WelcomeMode = raw.welcome === "overlay" || raw.welcome === "off" ? raw.welcome : "header";
-	// 0.86.0+ streams the working spinner into the editor's top border when the
-	// editor opts in; pi's own default editor does. Match it unless told not to.
-	const embedWorkingStatus = raw.embedWorkingStatus === false ? false : true;
+	// 0.86.0+ can stream the working spinner into the editor's top border when
+	// the editor opts in. Default OFF: the spinner stays on pi's own loader line
+	// (embedding it into the editor read as clutter). Opt in with true.
+	const embedWorkingStatus = raw.embedWorkingStatus === true;
 	return { welcome, embedWorkingStatus };
 }
 
@@ -302,19 +306,20 @@ function statusBar(width: number, ctx: any, footerData: any): string {
 		fg(C.ok, G.branch + " " + (footerData?.getGitBranch?.() ?? "—")),
 	].join(sep);
 	const now = new Date();
-	// Extension statuses (ctx.ui.setStatus entries — ours and other extensions';
-	// the ADR-0002 seam). Plain text renders dim; text that already carries ANSI
-	// goes through untouched.
-	const statuses: string[] = [];
-	const extStatuses = footerData?.getExtensionStatuses?.();
-	if (extStatuses && typeof extStatuses.forEach === "function")
-		extStatuses.forEach((t: string) => { if (t) statuses.push(/\x1b\[/.test(t) ? t : fg(C.dim, t)); });
-	const right = [...statuses, fg(C.muted, `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`)].join(sep);
+	// Only nebula's OWN status rides the right edge. Other extensions' setStatus
+	// entries (search / cache / balance) are deliberately NOT rendered here — the
+	// old getExtensionStatuses() pile was noise. footerData.getExtensionStatuses()
+	// is a Map<key, text>; the update hint is ours, keyed "nebula".
+	const own = footerData?.getExtensionStatuses?.()?.get?.("nebula");
+	const right = [
+		own ? (/\x1b\[/.test(own) ? own : fg(C.dim, own)) : null,
+		fg(C.muted, `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`),
+	].filter((x): x is string => x != null).join(sep);
 	return ind + fit(lr(left, right, w), w);
 }
 
 // ----------------------------------------------------------- metrics bar --
-function metricsBar(width: number, ctx: any): string {
+function metricsBar(width: number, ctx: any, footerData: any): string {
 	const w = Math.max(40, width - INDENT - 2);
 	let input = 0, output = 0, cost = 0, cacheRead = 0;
 	for (const e of ctx.sessionManager.getBranch()) {
@@ -338,6 +343,12 @@ function metricsBar(width: number, ctx: any): string {
 		fg(C.text, hit) + " " + fg(C.dim, "cache"),
 		fg(C.text, `$${cost.toFixed(3)}`) + " " + fg(C.dim, "cost"),
 	];
+	// Balance — pi-usage's status (key "usage"). The value is provider-specific
+	// ("r4coder $79.12", "openrouter $12.40 left", …); keep only the currency
+	// amount to match the design's `balance $12.40`.
+	const usageStatus = footerData?.getExtensionStatuses?.()?.get?.("usage");
+	const balance = usageStatus ? (/([$€£¥₹]\s?[\d,]+(?:\.\d+)?)/.exec(usageStatus)?.[1] ?? usageStatus) : undefined;
+	if (balance) parts.push(fg(C.dim, "balance ") + fg(C.text, balance));
 	return " ".repeat(INDENT) + fit(parts.join(fg(C.dim, " │ ")), w);
 }
 
@@ -660,22 +671,14 @@ function markUserMessage(markdown: string): string {
 }
 
 // -------------------------------------------------- working indicator --
-// Cold-tone breathing animation for pi's streaming spinner (ADR-0006 item C).
-// pi drives the frame loop itself (docs/extensions.md setWorkingIndicator), so
-// there is no repaint risk — we only supply frames. The dot breathes
-// · → • → ● while the hue sweeps the nebula cold range (base0B → 0C → 0D → 0E);
-// exact form is up to visual acceptance (ADR: “具体形态目视验收定”).
-const WORKING_FRAMES: string[] = [
-	fg(C.muted, "·"),
-	fg(C.ok, "•"),
-	fg(C.info, "●"),
-	fg(C.cyan, "●"),
-	fg(C.key, "●"),
-	fg(C.info, "●"),
-	fg(C.ok, "•"),
-	fg(C.muted, "·"),
-];
-const WORKING_INTERVAL_MS = 120;
+// Purple ◆ breathing pulse for pi's streaming spinner (ADR-0006 item C). pi
+// drives the frame loop itself (docs/extensions.md setWorkingIndicator), so
+// there is no repaint risk — we only supply frames. The glyph is the design's
+// accent diamond (◆), which breathes by fading along its own luminance ramp
+// (deep → accent → highlight → back) instead of sweeping hues.
+const WORKING_SHADES = ["6b2f5a", "9c3f7f", "cc52a4", "ff6ad5", "ff9ae4", "ff6ad5", "cc52a4", "9c3f7f"];
+const WORKING_FRAMES: string[] = WORKING_SHADES.map((s) => fg(s, "◆"));
+const WORKING_INTERVAL_MS = 110;
 
 // ------------------------------------------------- update self-check --
 // ADR-0006 D: once a day, fire-and-forget `git ls-remote --tags` against the
@@ -771,11 +774,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", (_event, ctx) => {
 		stopWatching?.();
 		stopWatching = undefined;
-		// Restore pi's default spinner/message in case the next session loads
-		// without nebula (extension removed or disabled between sessions).
+		// Restore pi's default spinner in case the next session loads without
+		// nebula (extension removed or disabled between sessions).
 		try {
 			(ctx as any)?.ui?.setWorkingIndicator?.(undefined);
-			(ctx as any)?.ui?.setWorkingMessage?.(undefined);
 		} catch { /* best effort — ctx may already be stale */ }
 	});
 
@@ -838,7 +840,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				ctx.ui.setWidget("nebula-metrics", (tui: any) => ({
 					invalidate() { tui.requestRender(); },
-					render: (width: number) => [metricsBar(width, ctx)],
+					render: (width: number) => [metricsBar(width, ctx, cachedFooterData)],
 				}), { placement: "belowEditor" });
 			} catch (e) { console.debug("[pi-nebula] setWidget(metrics) failed:", e); }
 
@@ -851,13 +853,12 @@ export default function (pi: ExtensionAPI) {
 				}
 			} catch (e) { console.debug("[pi-nebula] setEditorComponent failed:", e); }
 
-			// Working indicator: our frames, pi's frame loop. CustomEditor's 4th ctor
-			// arg ({ embedWorkingStatus }) streams the animation into the editor's top
-			// border (pi 0.86.0+); without it the spinner lives on the loader line.
-			// Both restore points call setWorkingIndicator(undefined) = pi's default.
+			// Working indicator: our ◆ frames, pi's frame loop. With
+			// embedWorkingStatus off (the default) the animation stays on pi's
+			// loader line instead of the editor's top border. The restore points
+			// call setWorkingIndicator(undefined) = pi's default spinner.
 			try {
 				ctx.ui.setWorkingIndicator?.({ frames: WORKING_FRAMES, intervalMs: WORKING_INTERVAL_MS });
-				ctx.ui.setWorkingMessage?.(fg(C.muted, "Working…"));
 			} catch (e) { console.debug("[pi-nebula] setWorkingIndicator failed:", e); }
 
 			// Update self-check (ADR-0006 D): throttled to daily, fire-and-forget,
@@ -903,7 +904,6 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setEditorComponent(undefined);
 			try {
 				ctx.ui.setWorkingIndicator?.(undefined);
-				ctx.ui.setWorkingMessage?.(undefined);
 				ctx.ui.setStatus?.("nebula", undefined);
 			} catch { /* best effort */ }
 			ctx.ui.notify("pi-nebula disabled for this session", "info");
